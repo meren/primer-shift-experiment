@@ -2,35 +2,102 @@ import sys
 import numpy
 import cPickle
 import operator
+import itertools
 
+
+def bump_dict(d, key, val = 1):
+    if d.has_key(key):
+        d[key] += val
+    else:
+        d[key] = val
+    
+    return d
+
+def get_sorted(d):
+    return sorted(d.iteritems(), key=operator.itemgetter(1), reverse = True)
 
 class Errors:
-    def __init__(self, downstream = 1, upstream = 1):
-        self.errors = {'upstream': {}, 'downstream': {}}
+    def __init__(self, tags_dict, downstream = 1, upstream = 1):
+        self.errors = {'upstream': {}, 'downstream': {}, 'linked': {}, 'mutation': {}, 'word': {}}
+        self.null_stats = {'upstream': {}, 'downstream': {}, 'linked': {}, 'word':{}, 'bases': {}}
         self.error_locations = {}
         self.downstream = downstream
         self.upstream = upstream
+        self.tags_dict = tags_dict
+        
+        self.bases = ['A', 'T', 'C', 'G']
+        
+        self.compute_null_stats()
     
-    def add_error(self, seq, pos):
+    def compute_null_stats(self):
+        
+        u = [self.bases] * self.upstream
+        upstream_combinations = [''.join(x) for x in list(itertools.product(*u))]
+
+        d = [self.bases] * self.downstream
+        downstream_combinations = [''.join(x) for x in list(itertools.product(*d))]
+        
+        l = [self.bases] * (1 + self.downstream + self.upstream)
+        linked_combinations = [''.join(x) for x in list(itertools.product(*l))]
+        linked_combinations = list(set([x[0:self.upstream] + '|' + x[self.upstream + 1:] for x in linked_combinations]))
+        
+        
+        downstream_combinations = [] if downstream_combinations == [''] else downstream_combinations
+        upstream_combinations = [] if upstream_combinations == [''] else upstream_combinations
+        
+        for tag in self.tags_dict:
+            for seq in self.tags_dict[tag]:
+                freq = self.tags_dict[tag][seq]
+                
+                # BASES:
+                for base in self.bases:
+                    self.null_stats['bases'] = bump_dict(self.null_stats['bases'], base, seq.count(base) * freq)
+                
+                
+                # UPSTREAM AND DOWNSTREAM COMBINATIONS
+                for upstream_combination in upstream_combinations:
+                    uc = seq.count(upstream_combination) * freq
+                    if uc:
+                        self.null_stats['upstream'] = bump_dict(self.null_stats['upstream'], upstream_combination, uc)
+                        
+                for downstream_combination in downstream_combinations:
+                    dc = seq.count(downstream_combination) * freq
+                    if dc:
+                        self.null_stats['downstream'] = bump_dict(self.null_stats['downstream'], downstream_combination, dc)
+    
+    
+        print self.null_stats
+    
+    
+    def add_error(self, abundant_seq, erronous_seq, pos):
         if self.error_locations.has_key(pos):
             self.error_locations[pos] += 1
         else:
             self.error_locations[pos] = 1
-            
-        if not pos < self.downstream:
-            downstream_seq = seq[pos - self.downstream:pos]
-            if self.errors['downstream'].has_key(downstream_seq):
-                self.errors['downstream'][downstream_seq] += 1
-            else:
-                self.errors['downstream'][downstream_seq] = 1
+        
+        downstream_seq, upstream_seq = '', '' 
+        
+        if self.upstream and not pos < self.upstream:
+            upstream_seq = abundant_seq[pos - self.upstream:pos]
+            self.errors['upstream'] = bump_dict(self.errors['upstream'], upstream_seq)
 
-        if not len(seq) < pos + self.upstream + 1:
-            upstream_seq = seq[pos + 1:pos + 1 + self.upstream]
-            if self.errors['upstream'].has_key(upstream_seq):
-                self.errors['upstream'][upstream_seq] += 1
-            else:
-                self.errors['upstream'][upstream_seq] = 1
+        if self.downstream and not len(abundant_seq) < pos + self.downstream + 1:
+            downstream_seq = abundant_seq[pos + 1:pos + 1 + self.downstream]
+            self.errors['downstream'] = bump_dict(self.errors['downstream'], downstream_seq)
     
+        if upstream_seq or downstream_seq:
+            linked_seq = downstream_seq + '|' + upstream_seq
+            self.errors['linked'] = bump_dict(self.errors['linked'], linked_seq)
+            
+        if upstream_seq or downstream_seq:
+            from_seq = downstream_seq + abundant_seq[pos].lower() + upstream_seq
+            to_seq = downstream_seq + erronous_seq[pos].lower() + upstream_seq
+            
+            self.errors['word'] = bump_dict(self.errors['word'], '%s:%s' % (from_seq, to_seq))
+ 
+        mutation = abundant_seq[pos] + ':' + erronous_seq[pos]
+        self.errors['mutation'] = bump_dict(self.errors['mutation'], mutation)
+            
 
     def show_error_distribution(self):
         err_dist = []
@@ -48,12 +115,47 @@ class Errors:
         plt.xlim(xmin = 0, xmax = len(err_dist))
         plt.show()
     
-    def show_error_downstream(self):
-        print sorted(self.errors['downstream'].iteritems(), key=operator.itemgetter(1), reverse = True)
+    def show_errors_downstream(self):
+        print get_sorted(self.errors['downstream'])
         
-    def show_error_upstream(self):
-        print sorted(self.errors['upstream'].iteritems(), key=operator.itemgetter(1), reverse = True)
+    def show_errors_upstream(self):
+        print get_sorted(self.errors['upstream'])
         
+    def show_errors_linked(self):
+        print get_sorted(self.errors['linked'])
+        
+    def show_mutations(self):
+        print get_sorted(self.errors['mutation'])
+        
+    def show_words(self):
+        print get_sorted(self.errors['word'])
+        
+    def show(self):
+        print
+        print
+        print 'Downstream:' 
+        self.show_errors_downstream()
+
+        print
+        print
+        print 'Upstream:' 
+        self.show_errors_upstream()
+    
+        print
+        print
+        print 'Linked:' 
+        self.show_errors_linked()
+    
+        print
+        print
+        print 'Mutations:' 
+        self.show_mutations()
+        
+        print
+        print
+        print 'Words:'
+        self.show_words()
+    
         
 def pp(n):
     """Pretty print function for very big integers"""
@@ -87,6 +189,7 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
     reads_represented = sum([x[0] for x in tags_final])
     reads_discarded = sum([x[0] for x in tags_discarded])
     
+    
     print 'Number of tags ...........................: %s' % pp(num_tags)
     print 'Number of reads ..........................: %s' % pp(total_number_of_reads)
     print 'Mean tag abundance .......................: %.2f' % numpy.mean(abundances) 
@@ -101,9 +204,12 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
     if dry_run:
         sys.exit()
     
-    errors = Errors(upstream = upstream, downstream = downstream)
-    
     tags = [t[1] for t in tags_final]
+    tags_dict_final = {}
+    for tag in tags:
+        tags_dict_final[tag] = tags_dict[tag] 
+        
+    errors = Errors(tags_dict = tags_dict_final, upstream = upstream, downstream = downstream)
     
     num_indels_ignored = 0
     
@@ -117,7 +223,7 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
                 counter += 1
                 for i in range(0, tags_dict[tag][seq]):
                     f.write('>%s | seq: %d | count: %d\n%s\n' % (tag, counter, i, seq))
-                f.close()
+            f.close()
         
         seqs_sorted_by_abundance = sorted(tags_dict[tag].iteritems(), key=operator.itemgetter(1), reverse = True)
         most_abundant_seq = seqs_sorted_by_abundance[0][0]
@@ -147,17 +253,11 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
             
             for pos in range(0, len(current_seq)):
                 if most_abundant_seq[pos] != current_seq[pos]:
-                    errors.add_error(most_abundant_seq, pos)
+                    errors.add_error(most_abundant_seq, current_seq, pos)
                 
 
-    print 'downstream:' 
-    errors.show_error_downstream()
-
-    print 'upstream:' 
-    errors.show_error_upstream()
-    
-    print 'num in/dels ignored:'
-    print num_indels_ignored
+    print '* num in/dels ignored:', num_indels_ignored
+    errors.show()
             
         
 if __name__ == '__main__':
