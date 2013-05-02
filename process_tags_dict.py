@@ -1,9 +1,16 @@
+import re
 import sys
 import numpy
 import cPickle
 import operator
 import itertools
 
+def get_frequency_dict(d):
+    d_freq = {}
+    total = sum(d.values()) * 1.0
+    for key in d:
+        d_freq[key] = d[key] / total
+    return d_freq
 
 def bump_dict(d, key, val = 1):
     if d.has_key(key):
@@ -17,18 +24,36 @@ def get_sorted(d):
     return sorted(d.iteritems(), key=operator.itemgetter(1), reverse = True)
 
 class Errors:
-    def __init__(self, tags_dict, downstream = 1, upstream = 1):
+    def __init__(self, tags_dict, downstream = 1, upstream = 1, tags_dict_path = 'Unknown'):
         self.errors = {'upstream': {}, 'downstream': {}, 'linked': {}, 'mutation': {}, 'word': {}}
         self.null_stats = {'upstream': {}, 'downstream': {}, 'linked': {}, 'word':{}, 'bases': {}}
         self.error_locations = {}
         self.downstream = downstream
         self.upstream = upstream
         self.tags_dict = tags_dict
+        self.tags_dict_path = tags_dict_path
         
         self.bases = ['A', 'T', 'C', 'G']
         
         self.compute_null_stats()
-    
+
+    def save_results(self, null_d, observed_d, result_type):
+        keys_sorted = [x[0] for x in get_sorted(null_d)]
+        null_d_f = get_frequency_dict(null_d)
+        observed_d_f = get_frequency_dict(observed_d)
+        output_file_path = '%s-US%d-DS%d-%s.txt' % (self.tags_dict_path, self.upstream, self.downstream, result_type)
+        f = open(output_file_path, 'w')
+        f.write('oligo\tbin\tfrequency\tdiff\n')
+        for oligo in keys_sorted:
+            null_d_f_v = null_d_f[oligo]
+            observed_d_f_v = observed_d_f[oligo] if observed_d_f.has_key(oligo) else 0.0
+            diff = numpy.abs(null_d_f_v - observed_d_f_v)
+            f.write('%s\t%s\t%.4f\t%.4f\n' % (oligo, 'null', null_d_f_v, diff))
+            f.write('%s\t%s\t%.4f\t%.4f\n' % (oligo, 'observed', observed_d_f_v, diff))
+        f.close()
+        sys.stderr.write('Results for %s stored in "%s".' % (result_type, output_file_path))
+        
+ 
     def compute_null_stats(self):
         
         u = [self.bases] * self.upstream
@@ -38,14 +63,23 @@ class Errors:
         downstream_combinations = [''.join(x) for x in list(itertools.product(*d))]
         
         l = [self.bases] * (1 + self.downstream + self.upstream)
-        linked_combinations = [''.join(x) for x in list(itertools.product(*l))]
-        linked_combinations = list(set([x[0:self.upstream] + '|' + x[self.upstream + 1:] for x in linked_combinations]))
-        
+        link_combinations = [''.join(x) for x in list(itertools.product(*l))]
+        link_combinations = list(set([x[0:self.upstream] + '|' + x[self.upstream + 1:] for x in link_combinations]))
+        link_combinations_re_objects = {} 
+        num_link_combinations = len(link_combinations)
+        for i in range(0, num_link_combinations):
+            link = link_combinations[i]
+            link_combinations_re_objects[link] = re.compile(link.replace('|', '.')) 
         
         downstream_combinations = [] if downstream_combinations == [''] else downstream_combinations
         upstream_combinations = [] if upstream_combinations == [''] else upstream_combinations
         
+        num_tags = len(self.tags_dict)
+        counter = 0
         for tag in self.tags_dict:
+            counter += 1
+            sys.stderr.write('\rComputing null stats for all reads .. %.1f%%' % ((counter * 100.0) / num_tags))
+            sys.stderr.flush()
             for seq in self.tags_dict[tag]:
                 freq = self.tags_dict[tag][seq]
                 
@@ -64,11 +98,15 @@ class Errors:
                     dc = seq.count(downstream_combination) * freq
                     if dc:
                         self.null_stats['downstream'] = bump_dict(self.null_stats['downstream'], downstream_combination, dc)
-    
-    
-        print self.null_stats
-    
-    
+                
+                for link in link_combinations:
+                    lc = len(link_combinations_re_objects[link].findall(seq)) * freq
+                    if lc:
+                        self.null_stats['linked'] = bump_dict(self.null_stats['linked'], link, lc)
+        sys.stderr.write('\rComputing null stats for all reads .. done...\n')
+        sys.stderr.flush()
+
+ 
     def add_error(self, abundant_seq, erronous_seq, pos):
         if self.error_locations.has_key(pos):
             self.error_locations[pos] += 1
@@ -86,14 +124,21 @@ class Errors:
             self.errors['downstream'] = bump_dict(self.errors['downstream'], downstream_seq)
     
         if upstream_seq or downstream_seq:
-            linked_seq = downstream_seq + '|' + upstream_seq
-            self.errors['linked'] = bump_dict(self.errors['linked'], linked_seq)
+            linked_seq = upstream_seq + '|' + downstream_seq
+           
+            skip = False 
+            if self.upstream and not upstream_seq:
+                skip = True
+            if self.downstream and not downstream_seq:
+                skip = True
             
-        if upstream_seq or downstream_seq:
-            from_seq = downstream_seq + abundant_seq[pos].lower() + upstream_seq
-            to_seq = downstream_seq + erronous_seq[pos].lower() + upstream_seq
+            if not skip:
+                self.errors['linked'] = bump_dict(self.errors['linked'], linked_seq)
             
-            self.errors['word'] = bump_dict(self.errors['word'], '%s:%s' % (from_seq, to_seq))
+                from_seq = downstream_seq + abundant_seq[pos].lower() + upstream_seq
+                to_seq = downstream_seq + erronous_seq[pos].lower() + upstream_seq
+            
+                self.errors['word'] = bump_dict(self.errors['word'], '%s:%s' % (from_seq, to_seq))
  
         mutation = abundant_seq[pos] + ':' + erronous_seq[pos]
         self.errors['mutation'] = bump_dict(self.errors['mutation'], mutation)
@@ -110,25 +155,35 @@ class Errors:
         print
         print err_dist
         
-        import matplotlib.pyplot as plt
-        plt.plot(err_dist)
-        plt.xlim(xmin = 0, xmax = len(err_dist))
-        plt.show()
+        output = open(self.tags_dict_path + '-ERR-DIST.txt', 'w')
+        total = sum(err_dist) * 1.0
+        output.write('pos\tfrequency\n')
+        for i in range(0, len(err_dist)):
+            output.write('%d\t%.4f\n' % (i, err_dist[i] / total))
+        
+        output.close()
+
     
     def show_errors_downstream(self):
-        print get_sorted(self.errors['downstream'])
+        print 'null    : ', get_sorted(self.null_stats['downstream'])[0:10]
+        print 'observed: ', get_sorted(self.errors['downstream'])[0:10]
+        self.save_results(self.null_stats['downstream'], self.errors['downstream'], 'downstream')
         
     def show_errors_upstream(self):
-        print get_sorted(self.errors['upstream'])
+        print 'null    : ', get_sorted(self.null_stats['upstream'])[0:10]
+        print 'observed: ', get_sorted(self.errors['upstream'])[0:10]
+        self.save_results(self.null_stats['upstream'], self.errors['upstream'], 'upstream')
         
     def show_errors_linked(self):
-        print get_sorted(self.errors['linked'])
+        print 'null    : ', get_sorted(self.null_stats['linked'])[0:10]
+        print 'observed: ', get_sorted(self.errors['linked'])[0:10]
+        self.save_results(self.null_stats['linked'], self.errors['linked'], 'linked')
         
     def show_mutations(self):
         print get_sorted(self.errors['mutation'])
         
     def show_words(self):
-        print get_sorted(self.errors['word'])
+        print get_sorted(self.errors['word'])[0:10]
         
     def show(self):
         print
@@ -155,6 +210,8 @@ class Errors:
         print
         print 'Words:'
         self.show_words()
+        
+        self.show_error_distribution()
     
         
 def pp(n):
@@ -200,6 +257,7 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
     print '  Number of reads represented ............: %s (%.2f%% of all reads)' % (pp(reads_represented), reads_represented * 100.0 / total_number_of_reads)
     print 'Number of tags below --min-tag-abundance .: %s' % pp(len(tags_discarded))
     print '  Number of reads discarded ..............: %s (%.2f%% of all reads)' % (pp(reads_discarded), reads_discarded * 100.0 / total_number_of_reads)
+    print
 
     if dry_run:
         sys.exit()
@@ -209,12 +267,16 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
     for tag in tags:
         tags_dict_final[tag] = tags_dict[tag] 
         
-    errors = Errors(tags_dict = tags_dict_final, upstream = upstream, downstream = downstream)
+    errors = Errors(tags_dict = tags_dict_final, upstream = upstream, downstream = downstream, tags_dict_path = tags_dict_path)
     
     num_indels_ignored = 0
     
+    
     for i in range(0, len(tags)):
         tag = tags[i]
+        
+        sys.stderr.write('\rProcessing PCR errors for %d tags .. %.1f%%' % (num_tags, (i * 100.0) / num_tags))
+        sys.stderr.flush()
         
         if save_individual_fasta:
             f = open('TAG_%.5d_%s.fa' % (i, tag), 'w')
@@ -256,6 +318,8 @@ def main(tags_dict_path, min_tag_abundance = 10, dry_run = False, save_individua
                     errors.add_error(most_abundant_seq, current_seq, pos)
                 
 
+    sys.stderr.write('\rProcessing PCR errors for %d tags .. done...\n' % (num_tags))
+    sys.stderr.flush()
     print '* num in/dels ignored:', num_indels_ignored
     errors.show()
             
