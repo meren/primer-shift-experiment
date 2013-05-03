@@ -50,13 +50,13 @@ k <- cor(df[df$bin == 'observed', ]$frequency, df[df$bin == 'null', ]$frequency,
 
 P <- function(){
 	p = ggplot(df, aes(x = pos, y = frequency, group = source, color = source))
-	p <- p + geom_line()
-	p <- p + theme(axis.text.x = element_text(size = 20, angle=90, vjust=8))
+	p <- p + geom_line(size=1, alpha=.75)
+	p <- p + theme(axis.text.x = element_text(size = 16, angle=90, vjust=0.5))
 	p <- p + theme(axis.text.y = element_text(size = 12))
-	p <- p + theme(legend.position = 'bottom')
+	p <- p + theme(legend.position = 'bottom', legend.text=element_text(size=14))
 	p <- p + labs(x='', y='Frequency')
 	p <- p + scale_x_continuous(breaks=c(df$pos))
-	#p <- p + ggtitle(options$title)
+	p <- p + ggtitle(options$title)
 	p <- p + coord_cartesian(ylim=c(0, max(df$frequency) * 1.1))
 	p <- p + theme(plot.title = element_text(hjust=0, vjust=1))
 	#p <- p + facet_grid(source ~ .)
@@ -68,6 +68,6 @@ P()
 
 # gen PDF
 pdf_output <- paste(options$output_file_prefix,".pdf",sep="")
-pdf(pdf_output, width = 16, height = 12)
+pdf(pdf_output, width = 16, height = 6)
 P()
 sprintf("Lines PDF: '%s'", pdf_output)
